@@ -1060,6 +1060,9 @@ class CancelledNotification(
     params: CancelledNotificationParams
 
 
+# BaseModel: 用于定义具有多个字段的数据模型，支持复杂的数据结构、嵌套模型和自动验证。
+# RootModel: 用于定义单一根类型的数据模型，适合需要处理简单数据结构的场景。
+# RootModel[PingRequest| InitializeRequest]是为了支持多态，表明ClientRequest可以是[]内的任意一个类型
 class ClientRequest(
     RootModel[
         PingRequest

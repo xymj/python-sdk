@@ -92,6 +92,15 @@ class StdioServerParameters(BaseModel):
     """
 
 
+# @asynccontextmanager 是 Python 标准库 contextlib 模块提供的一个装饰器，用于实现异步上下文管理器。
+# 简化创建: @asynccontextmanager 装饰器允许你使用简单的生成器函数来定义异步上下文管理器，而不是通过编写完整的类（需要实现 __aenter__ 和 __aexit__ 方法）。
+# 生成器语法: 通过 async 和 yield 语句相结合，你可以在生成器内管理进入和退出上下文时的资源获取和释放。
+#
+# 入口代码: 在 yield 之前，放置任何需要在上下文进入时执行的初始化代码，比如资源获取或其他设置。
+# yield 语句: yield 将上下文管理器的控制权交给 async with 语句块。yield 后的值传递给 async with 块。
+# 退出代码: 在 finally 块中，放置任何需要在上下文退出时执行的清理代码，比如释放资源或其他清理工作。这部分代码无论 async with 块是否正常退出或由于异常退出都会被执行。
+
+# 通过 @asynccontextmanager 和 AsyncExitStack 的协作，开发者可以以一种优雅和简洁的方式管理异步资源，确保在程序执行过程中资源正确地获取和释放。enter_async_context 进一步简化了资源管理逻辑，使得代码更加直观。
 @asynccontextmanager
 async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stderr):
     """
@@ -104,6 +113,7 @@ async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stder
     write_stream: MemoryObjectSendStream[types.JSONRPCMessage]
     write_stream_reader: MemoryObjectReceiveStream[types.JSONRPCMessage]
 
+    # 一个内存对象流，缓冲区大小为 0。这意味着发送到 read_stream_writer 的每条消息必须在 read_stream 消费之后才能继续发送下一条。这是一种背压机制，确保消费者能够跟上生产者的速度。
     read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
     write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
 
@@ -126,25 +136,39 @@ async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stder
         assert process.stdout, "Opened process is missing stdout"
 
         try:
+            # read_stream_writer 被声明为一个 MemoryObjectSendStream 类型，用于发送 JSONRPCMessage 或 Exception 类型的对象。
+            # 这是通过 AnyIO 创建的内存对象流的一部分，负责将读取的数据发送出去。
+            # 使用异步上下文管理器来管理 read_stream_writer 的生命周期。确保在上下文管理器退出时，read_stream_writer 被正确关闭
             async with read_stream_writer:
                 buffer = ""
+                # TextReceiveStream 是一个异步可迭代对象，用于从子进程的标准输出读取文本数据，指定了编码和错误处理方式。
+                # 异步迭代标准输出的每个数据块。
                 async for chunk in TextReceiveStream(
                     process.stdout,
                     encoding=server.encoding,
                     errors=server.encoding_error_handler,
                 ):
+                    # 将 buffer 已有数据与新读取的 chunk 数据拼接，并按行分割（换行符 \n）。
+                    # 结果是一个行列表 lines，可能最后一个元素是部分行。
                     lines = (buffer + chunk).split("\n")
+                    # 从 lines 列表中移除并返回最后一个元素，赋给 buffer。这个元素可能是行的一部分，不完整。
                     buffer = lines.pop()
 
                     for line in lines:
                         try:
+                            # 使用 model_validate_json 方法尝试将 line 解析为 JSONRPCMessage 对象。
                             message = types.JSONRPCMessage.model_validate_json(line)
                         except Exception as exc:
+                            # 如果解析失败，发送异常 exc 到 read_stream_writer。
                             await read_stream_writer.send(exc)
                             continue
 
+                        # 如果成功解析为 JSONRPCMessage，将消息发送到 read_stream_writer
                         await read_stream_writer.send(message)
+        # 捕获 anyio.ClosedResourceError，表示 read_stream_writer 已关闭。此时，进行适当的清理操作。
         except anyio.ClosedResourceError:
+            # await anyio.lowlevel.checkpoint() 是一种在异步代码中显式插入非阻塞点的机制，特别是在长时间运行的任务中使用时，可以提高异步系统的响应性和效率。
+            # 在密集计算或长时间执行的过程中，合理使用检查点可以确保异步事件循环的流畅运行，从而避免长时间占用 CPU 资源导致其他异步任务饿死的情况。
             await anyio.lowlevel.checkpoint()
 
     async def stdin_writer():
@@ -169,7 +193,9 @@ async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stder
     ):
         tg.start_soon(stdout_reader)
         tg.start_soon(stdin_writer)
+        # @asynccontextmanager配合使用
         try:
+            # yield 将上下文管理器的控制权交给 async with 语句块。yield 后的值传递给 async with 块。
             yield read_stream, write_stream
         finally:
             # Clean up process to prevent any dangling orphaned processes
@@ -209,6 +235,15 @@ async def _create_platform_compatible_process(
     if sys.platform == "win32":
         process = await create_windows_process(command, args, env, errlog, cwd)
     else:
+        # 使用 AnyIO 库中的 open_process 方法来启动一个子进程。open_process 是一种异步方式来处理进程的创建和管理。
+        # await 关键字表示这是一个异步操作。当前协程会暂停执行，直到 open_process 完成其创建子进程的操作。
+
+        # 列表 [command, *args] 指定了子进程将要执行的命令和参数。
+        #   command 是要执行的命令或可执行文件的路径。
+        #   *args 是传递给命令的参数。使用 *args 可以将一个可迭代的参数列表解包为多个单独的参数。
+        # env 参数允许你指定子进程的环境变量。env 应该是一个字典，包含环境变量的键值对。如果不指定，则子进程会继承当前进程的环境变量。
+        # stderr 参数指定子进程的标准错误输出（stderr）如何处理。errlog 可以是一个文件对象、管道等，用于捕获或重定向标准错误输出。
+        # cwd（current working directory）参数指定子进程的当前工作目录。cwd 应该是一个字符串，表示目录的路径。如果不指定，则子进程会在当前目录下执行。
         process = await anyio.open_process(
             [command, *args], env=env, stderr=errlog, cwd=cwd
         )
