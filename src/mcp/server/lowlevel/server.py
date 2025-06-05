@@ -135,6 +135,14 @@ class Server(Generic[LifespanResultT]):
         self.version = version
         self.instructions = instructions
         self.lifespan = lifespan
+        # Awaitable 是一个定义在 collections.abc 模块中的抽象基类，用于表示可以被 await 的对象。它通常用于类型注释中，以指示某个函数或方法的返回值可以通过 await 语法进行异步等待。
+        # Awaitable 的作用
+        #   表示异步操作的结果:
+        #       Awaitable 指定某个操作或函数的返回值是一个异步结果，这意味着可以使用 await 关键词来等待其完成。
+        #       在异步编程中，例如使用 asyncio 或其他异步框架时，Awaitable 的对象包含异步操作的结果。
+        #   类型提示:
+        #       在类型注释中使用 Awaitable 可以帮助开发者明确函数的返回值是可以异步等待的。这对代码的可读性和维护性非常有帮助。
+        #       例如，函数可能返回一个协程对象、Future 对象或其他实现了 Awaitable 协议的对象。
         self.request_handlers: dict[
             type, Callable[..., Awaitable[types.ServerResult]]
         ] = {
@@ -305,7 +313,18 @@ class Server(Generic[LifespanResultT]):
                                 mimeType=mime_type or "application/octet-stream",
                             )
 
+                # match 语句是一种模式匹配结构，首次引入于 Python 3.10。它用于根据值的结构和内容来执行条件分支。
+                # match 语句可以通过检查值的类型与结构来实现复杂的条件判断，比传统的条件语句更加简洁和强大。
+
+                # match 语句的含义和作用
+                #   结构化模式匹配:
+                #       match 语句允许对给定的值进行结构化的模式匹配。这意味着可以检查值的类型、内容甚至是结构，以决定执行哪一个分支。
+                #       case 子句用于定义具体的匹配模式和相应的操作。
+                #   类似于 switch-case:
+                #       在许多编程语言中，类似于 switch-case 结构，但 match 支持更复杂的匹配条件，包括类型检查和解构。
                 match result:
+                    # 如果 result 是 str 或 bytes 类型，进入这个分支。
+                    # 使用 create_content(data, None) 将数据转换为适当的内容对象。
                     case str() | bytes() as data:
                         warnings.warn(
                             "Returning str or bytes from read_resource is deprecated. "
@@ -314,6 +333,9 @@ class Server(Generic[LifespanResultT]):
                             stacklevel=2,
                         )
                         content = create_content(data, None)
+                    # 如果 result 是可迭代的（如列表、元组等），进入这个分支。
+                    # 对每个元素进行处理，并将其转换为内容对象列表 contents_list。
+                    # 返回一个 types.ServerResult，包含处理后的内容。
                     case Iterable() as contents:
                         contents_list = [
                             create_content(content_item.content, content_item.mime_type)
@@ -511,6 +533,17 @@ class Server(Generic[LifespanResultT]):
             # TODO(Marcelo): We should be checking if message is Exception here.
             match message:  # type: ignore[reportMatchNotExhaustive]
                 case (
+                    # 模式匹配:
+                    #   case 语句尝试匹配 message 的结构和内容。
+                    #   它匹配的是 RequestResponder 类型的 message，其中有一个 request 属性，该属性应该匹配类型为 types.ClientRequest 的对象。
+                    # 嵌套匹配:
+                    #   request=types.ClientRequest(root=req) 进一步对 RequestResponder 的 request 属性进行结构匹配。
+                    #   types.ClientRequest(root=req) 表示 request 应该是一个 types.ClientRequest 对象，并且它有一个 root 属性。
+                    # 变量绑定:
+                    #   root=req 是模式匹配的一个部分，表示将 ClientRequest 对象的 root 属性的值绑定到变量 req。
+                    #   req 的值在匹配成功后可用于后续代码块。
+                    # 别名:
+                    #   as responder 用于将匹配成功的整个 RequestResponder 对象绑定到变量 responder。
                     RequestResponder(request=types.ClientRequest(root=req)) as responder
                 ):
                     with responder:

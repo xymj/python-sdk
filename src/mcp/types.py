@@ -1063,6 +1063,15 @@ class CancelledNotification(
 # BaseModel: 用于定义具有多个字段的数据模型，支持复杂的数据结构、嵌套模型和自动验证。
 # RootModel: 用于定义单一根类型的数据模型，适合需要处理简单数据结构的场景。
 # RootModel[PingRequest| InitializeRequest]是为了支持多态，表明ClientRequest可以是[]内的任意一个类型
+
+# RootModel 泛型:
+#   RootModel 是一个泛型类，它可以接受多种类型作为参数。这里它接受了多个具体的请求类型（如 PingRequest、InitializeRequest 等）的联合类型。
+#   这种设计允许 ClientRequest 实例化时可以具有各种具体请求类型中的一种。
+# root 的解释:
+#   在模式匹配和类型处理的上下文中，root 通常指的是 RootModel 内部的具体类型实例。
+#   例如，如果 ClientRequest 的实例化对象在运行时实际使用的是 PingRequest，那么 root 就指向该 PingRequest 实例。
+# 类定义的目的:
+#   这种定义方式允许 ClientRequest 能够灵活地处理不同类型的请求，由此提供一种统一的接口来处理不同的数据结构。
 class ClientRequest(
     RootModel[
         PingRequest

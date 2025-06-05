@@ -37,6 +37,12 @@ class ArgModelBase(BaseModel):
 
 
 class FuncMetadata(BaseModel):
+    # Annotated 是 Python 3.9 引入的一个类型提示工具，定义在 typing 模块中。它用于为类型添加附加信息或元数据，而不影响类型本身。
+    # 在 Python 中，Annotated 是一个类型提示工具（Type Hinting Tool），用于在类型注解中附加元数据或配置。结合 Pydantic 的 ArgModelBase 和自定义的 WithJsonSchema，这行代码的作用是：定义一个类型为 ArgModelBase 子类的变量，并附加 JSON Schema 的配置信息。
+
+    # Annotated：用于在类型注解中附加元数据（如 WithJsonSchema）。
+    # type[ArgModelBase]：表示变量的类型必须是 ArgModelBase 的子类。
+    # WithJsonSchema(None)：可能用于控制 JSON Schema 的生成行为（如禁用或自定义配置）。
     arg_model: Annotated[type[ArgModelBase], WithJsonSchema(None)]
     # We can add things in the future like
     #  - Maybe some args are excluded from attempting to parse from JSON
@@ -175,7 +181,8 @@ def func_metadata(
     resp = FuncMetadata(arg_model=arguments_model)
     return resp
 
-
+# 描述: 解析类型注解，考虑可能的前向引用。
+# 参数: annotation 是类型注解，globalns 是全局命名空间。
 def _get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -> Any:
     def try_eval_type(
         value: Any, globalns: dict[str, Any], localns: dict[str, Any]
@@ -186,6 +193,7 @@ def _get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -> Any:
             return value, False
 
     if isinstance(annotation, str):
+        # 处理字符串类型注解: 如果类型注解是字符串（表示前向引用），将其转为 ForwardRef。
         annotation = ForwardRef(annotation)
         annotation, status = try_eval_type(annotation, globalns, globalns)
 
@@ -197,18 +205,36 @@ def _get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -> Any:
     return annotation
 
 
+# 前向引用类型注解是string串，标识具体的类类型
+# demo：
+# class User:
+#     pass
+# def create_user(user: 'User') -> bool:
+#     return True
+#
+# # 使用 _get_typed_signature 解析签名
+# signature = _get_typed_signature(create_user)
+# print(signature)  # 打印解析后的签名
+# 在这个示例中，create_user 函数的参数使用了前向引用类型注解 'User'。方法 _get_typed_signature 将解析注解，将 'User' 解析为实际的 User 类，返回的签名中包含了这个解析后的信息。
+
+# 这个方法的作用是获取一个函数的签名，同时解析任何前向引用的类型注解。
 def _get_typed_signature(call: Callable[..., Any]) -> inspect.Signature:
     """Get function signature while evaluating forward references"""
+    # 使用 inspect.signature(call) 获取函数的签名
     signature = inspect.signature(call)
+    # globalns 用于存储函数的全局命名空间，通常是函数定义所在模块的全局变量。
     globalns = getattr(call, "__globals__", {})
+    # 遍历签名中的参数，为每个参数创建一个新的 inspect.Parameter 对象。
     typed_params = [
         inspect.Parameter(
             name=param.name,
             kind=param.kind,
             default=param.default,
+            # 使用 _get_typed_annotation 方法解析参数的类型注解
             annotation=_get_typed_annotation(param.annotation, globalns),
         )
         for param in signature.parameters.values()
     ]
+    # 使用解析后的参数创建一个新的 Signature 对象
     typed_signature = inspect.Signature(typed_params)
     return typed_signature

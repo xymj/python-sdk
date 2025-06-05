@@ -12,12 +12,26 @@ from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
 DEFAULT_CLIENT_INFO = types.Implementation(name="mcp", version="0.1.0")
 
-
+# Protocol 的含义:
+#   Protocol 是 Python 的 typing 模块提供的，用于定义类型规范（或接口）。
+#   它允许你指定类必须实现哪些方法或属性，而不需要实现具体细节。
+#   使用 Protocol 可以在不改变现有类的情况下，指定它们需要符合的结构或接口。
+# __call__ 方法的作用:
+#   __call__ 方法是一种特殊的方法，使得类的实例对象可以像普通函数一样被调用。
+#   当你在类中定义 __call__ 方法后，便可以通过类的实例直接使用 () 运算符进行调用，而无需调用该类的其他方法。
+# 调用时机:
+#   __call__ 方法通常用于使类实例化后能够像函数一样被直接调用，简化接口的使用。
+#   典型应用包括定义回调函数、策略模式、或需要以函数方式调用的对象。
+# 定义协议: SamplingFnT 作为协议定义，规定任何符合该协议的类都需要实现 __call__ 方法，并接收特定参数，返回特定结果类型。
 class SamplingFnT(Protocol):
     async def __call__(
         self,
         context: RequestContext["ClientSession", Any],
         params: types.CreateMessageRequestParams,
+            # 未实现的方法:
+            #   在类的方法定义或协议（Protocol）中，... 表示该方法未实现，通常用于定义抽象方法或接口方法。它作为一个占位符，表示未来在该位置会有具体的实现。
+            # 类型提示中的占位符:
+            #   在类型提示（type hint）中，特别是在使用 Protocol 或抽象基类时，... 用于表示方法的定义，但没有具体实现。这可以让类型检查器知道，任何实现该协议的类都需要提供这个方法的实现。
     ) -> types.CreateMessageResult | types.ErrorData: ...
 
 
@@ -75,7 +89,9 @@ async def _default_logging_callback(
 ) -> None:
     pass
 
-
+# ClientResponse 是一个变量，类型为 TypeAdapter。它适配两种可能的类型：types.ClientResult 和 types.ErrorData。
+# 创建一个 TypeAdapter 实例，适配 types.ClientResult 或 types.ErrorData 类型。
+# 用于在运行时检查和转换数据类型，以确保数据符合预期的类型。
 ClientResponse: TypeAdapter[types.ClientResult | types.ErrorData] = TypeAdapter(
     types.ClientResult | types.ErrorData
 )
