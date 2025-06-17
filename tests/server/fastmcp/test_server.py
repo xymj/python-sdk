@@ -1,12 +1,14 @@
 import base64
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from pydantic import AnyUrl
+from starlette.routing import Mount, Route
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.prompts.base import EmbeddedResource, Message, UserMessage
+from mcp.server.fastmcp.prompts.base import Message, UserMessage
 from mcp.server.fastmcp.resources import FileResource, FunctionResource
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.shared.exceptions import McpError
@@ -14,7 +16,10 @@ from mcp.shared.memory import (
     create_connected_server_and_client_session as client_session,
 )
 from mcp.types import (
+    AudioContent,
     BlobResourceContents,
+    Content,
+    EmbeddedResource,
     ImageContent,
     TextContent,
     TextResourceContents,
@@ -32,15 +37,92 @@ class TestServer:
         assert mcp.instructions == "Server instructions"
 
     @pytest.mark.anyio
+    async def test_normalize_path(self):
+        """Test path normalization for mount paths."""
+        mcp = FastMCP()
+
+        # Test root path
+        assert mcp._normalize_path("/", "/messages/") == "/messages/"
+
+        # Test path with trailing slash
+        assert mcp._normalize_path("/github/", "/messages/") == "/github/messages/"
+
+        # Test path without trailing slash
+        assert mcp._normalize_path("/github", "/messages/") == "/github/messages/"
+
+        # Test endpoint without leading slash
+        assert mcp._normalize_path("/github", "messages/") == "/github/messages/"
+
+        # Test both with trailing/leading slashes
+        assert mcp._normalize_path("/api/", "/v1/") == "/api/v1/"
+
+    @pytest.mark.anyio
+    async def test_sse_app_with_mount_path(self):
+        """Test SSE app creation with different mount paths."""
+        # Test with default mount path
+        mcp = FastMCP()
+        with patch.object(mcp, "_normalize_path", return_value="/messages/") as mock_normalize:
+            mcp.sse_app()
+            # Verify _normalize_path was called with correct args
+            mock_normalize.assert_called_once_with("/", "/messages/")
+
+        # Test with custom mount path in settings
+        mcp = FastMCP()
+        mcp.settings.mount_path = "/custom"
+        with patch.object(mcp, "_normalize_path", return_value="/custom/messages/") as mock_normalize:
+            mcp.sse_app()
+            # Verify _normalize_path was called with correct args
+            mock_normalize.assert_called_once_with("/custom", "/messages/")
+
+        # Test with mount_path parameter
+        mcp = FastMCP()
+        with patch.object(mcp, "_normalize_path", return_value="/param/messages/") as mock_normalize:
+            mcp.sse_app(mount_path="/param")
+            # Verify _normalize_path was called with correct args
+            mock_normalize.assert_called_once_with("/param", "/messages/")
+
+    @pytest.mark.anyio
+    async def test_starlette_routes_with_mount_path(self):
+        """Test that Starlette routes are correctly configured with mount path."""
+        # Test with mount path in settings
+        mcp = FastMCP()
+        mcp.settings.mount_path = "/api"
+        app = mcp.sse_app()
+
+        # Find routes by type
+        sse_routes = [r for r in app.routes if isinstance(r, Route)]
+        mount_routes = [r for r in app.routes if isinstance(r, Mount)]
+
+        # Verify routes exist
+        assert len(sse_routes) == 1, "Should have one SSE route"
+        assert len(mount_routes) == 1, "Should have one mount route"
+
+        # Verify path values
+        assert sse_routes[0].path == "/sse", "SSE route path should be /sse"
+        assert mount_routes[0].path == "/messages", "Mount route path should be /messages"
+
+        # Test with mount path as parameter
+        mcp = FastMCP()
+        app = mcp.sse_app(mount_path="/param")
+
+        # Find routes by type
+        sse_routes = [r for r in app.routes if isinstance(r, Route)]
+        mount_routes = [r for r in app.routes if isinstance(r, Mount)]
+
+        # Verify routes exist
+        assert len(sse_routes) == 1, "Should have one SSE route"
+        assert len(mount_routes) == 1, "Should have one mount route"
+
+        # Verify path values
+        assert sse_routes[0].path == "/sse", "SSE route path should be /sse"
+        assert mount_routes[0].path == "/messages", "Mount route path should be /messages"
+
+    @pytest.mark.anyio
     async def test_non_ascii_description(self):
         """Test that FastMCP handles non-ASCII characters in descriptions correctly"""
         mcp = FastMCP()
 
-        @mcp.tool(
-            description=(
-                "🌟 This tool uses emojis and UTF-8 characters: á é í ó ú ñ 漢字 🎉"
-            )
-        )
+        @mcp.tool(description=("🌟 This tool uses emojis and UTF-8 characters: á é í ó ú ñ 漢字 🎉"))
         def hello_world(name: str = "世界") -> str:
             return f"¡Hola, {name}! 👋"
 
@@ -93,9 +175,7 @@ class TestServer:
     async def test_add_resource_decorator_incorrect_usage(self):
         mcp = FastMCP()
 
-        with pytest.raises(
-            TypeError, match="The @resource decorator was used incorrectly"
-        ):
+        with pytest.raises(TypeError, match="The @resource decorator was used incorrectly"):
 
             @mcp.resource  # Missing parentheses #type: ignore
             def get_data(x: str) -> str:
@@ -114,10 +194,11 @@ def image_tool_fn(path: str) -> Image:
     return Image(path)
 
 
-def mixed_content_tool_fn() -> list[TextContent | ImageContent]:
+def mixed_content_tool_fn() -> list[Content]:
     return [
         TextContent(type="text", text="Hello"),
         ImageContent(type="image", data="abc", mimeType="image/png"),
+        AudioContent(type="audio", data="def", mimeType="audio/wav"),
     ]
 
 
@@ -219,14 +300,16 @@ class TestServerTools:
         mcp.add_tool(mixed_content_tool_fn)
         async with client_session(mcp._mcp_server) as client:
             result = await client.call_tool("mixed_content_tool_fn", {})
-            assert len(result.content) == 2
-            content1 = result.content[0]
-            content2 = result.content[1]
+            assert len(result.content) == 3
+            content1, content2, content3 = result.content
             assert isinstance(content1, TextContent)
             assert content1.text == "Hello"
             assert isinstance(content2, ImageContent)
             assert content2.mimeType == "image/png"
             assert content2.data == "abc"
+            assert isinstance(content3, AudioContent)
+            assert content3.mimeType == "audio/wav"
+            assert content3.data == "def"
 
     @pytest.mark.anyio
     async def test_tool_mixed_list_with_image(self, tmp_path: Path):
@@ -276,9 +359,7 @@ class TestServerResources:
         def get_text():
             return "Hello, world!"
 
-        resource = FunctionResource(
-            uri=AnyUrl("resource://test"), name="test", fn=get_text
-        )
+        resource = FunctionResource(uri=AnyUrl("resource://test"), name="test", fn=get_text)
         mcp.add_resource(resource)
 
         async with client_session(mcp._mcp_server) as client:
@@ -314,9 +395,7 @@ class TestServerResources:
         text_file = tmp_path / "test.txt"
         text_file.write_text("Hello from file!")
 
-        resource = FileResource(
-            uri=AnyUrl("file://test.txt"), name="test.txt", path=text_file
-        )
+        resource = FileResource(uri=AnyUrl("file://test.txt"), name="test.txt", path=text_file)
         mcp.add_resource(resource)
 
         async with client_session(mcp._mcp_server) as client:
@@ -343,10 +422,25 @@ class TestServerResources:
         async with client_session(mcp._mcp_server) as client:
             result = await client.read_resource(AnyUrl("file://test.bin"))
             assert isinstance(result.contents[0], BlobResourceContents)
-            assert (
-                result.contents[0].blob
-                == base64.b64encode(b"Binary file data").decode()
-            )
+            assert result.contents[0].blob == base64.b64encode(b"Binary file data").decode()
+
+    @pytest.mark.anyio
+    async def test_function_resource(self):
+        mcp = FastMCP()
+
+        @mcp.resource("function://test", name="test_get_data")
+        def get_data() -> str:
+            """get_data returns a string"""
+            return "Hello, world!"
+
+        async with client_session(mcp._mcp_server) as client:
+            resources = await client.list_resources()
+            assert len(resources.resources) == 1
+            resource = resources.resources[0]
+            assert resource.description == "get_data returns a string"
+            assert resource.uri == AnyUrl("function://test")
+            assert resource.name == "test_get_data"
+            assert resource.mimeType == "text/plain"
 
 
 class TestServerResourceTemplates:
@@ -417,9 +511,7 @@ class TestServerResourceTemplates:
             return f"Data for {org}/{repo}"
 
         async with client_session(mcp._mcp_server) as client:
-            result = await client.read_resource(
-                AnyUrl("resource://cursor/fastmcp/data")
-            )
+            result = await client.read_resource(AnyUrl("resource://cursor/fastmcp/data"))
             assert isinstance(result.contents[0], TextResourceContents)
             assert result.contents[0].text == "Data for cursor/fastmcp"
 
@@ -518,8 +610,6 @@ class TestContextInjection:
 
     @pytest.mark.anyio
     async def test_context_logging(self):
-        from unittest.mock import patch
-
         import mcp.server.session
 
         """Test that context logging methods work."""
@@ -544,14 +634,28 @@ class TestContextInjection:
 
                 assert mock_log.call_count == 4
                 mock_log.assert_any_call(
-                    level="debug", data="Debug message", logger=None
+                    level="debug",
+                    data="Debug message",
+                    logger=None,
+                    related_request_id="1",
                 )
-                mock_log.assert_any_call(level="info", data="Info message", logger=None)
                 mock_log.assert_any_call(
-                    level="warning", data="Warning message", logger=None
+                    level="info",
+                    data="Info message",
+                    logger=None,
+                    related_request_id="1",
                 )
                 mock_log.assert_any_call(
-                    level="error", data="Error message", logger=None
+                    level="warning",
+                    data="Warning message",
+                    logger=None,
+                    related_request_id="1",
+                )
+                mock_log.assert_any_call(
+                    level="error",
+                    data="Error message",
+                    logger=None,
+                    related_request_id="1",
                 )
 
     @pytest.mark.anyio

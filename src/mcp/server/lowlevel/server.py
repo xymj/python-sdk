@@ -37,7 +37,8 @@ Usage:
 3. Define notification handlers if needed:
    @server.progress_notification()
    async def handle_progress(
-       progress_token: str | int, progress: float, total: float | None
+       progress_token: str | int, progress: float, total: float | None,
+       message: str | None
    ) -> None:
        # Implementation
 
@@ -71,11 +72,12 @@ import logging
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic
 
 import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from pydantic import AnyUrl
+from typing_extensions import TypeVar
 
 import mcp.types as types
 from mcp.server.lowlevel.helper_types import ReadResourceContents
@@ -84,16 +86,16 @@ from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server as stdio_server
 from mcp.shared.context import RequestContext
 from mcp.shared.exceptions import McpError
+from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.shared.session import RequestResponder
 
 logger = logging.getLogger(__name__)
 
 LifespanResultT = TypeVar("LifespanResultT")
+RequestT = TypeVar("RequestT", default=Any)
 
 # This will be properly typed in each Server instance's context
-request_ctx: contextvars.ContextVar[RequestContext[ServerSession, Any]] = (
-    contextvars.ContextVar("request_ctx")
-)
+request_ctx: contextvars.ContextVar[RequestContext[ServerSession, Any, Any]] = contextvars.ContextVar("request_ctx")
 
 
 class NotificationOptions:
@@ -109,7 +111,7 @@ class NotificationOptions:
 
 
 @asynccontextmanager
-async def lifespan(server: Server[LifespanResultT]) -> AsyncIterator[object]:
+async def lifespan(server: Server[LifespanResultT, RequestT]) -> AsyncIterator[object]:
     """Default lifespan context manager that does nothing.
 
     Args:
@@ -121,14 +123,15 @@ async def lifespan(server: Server[LifespanResultT]) -> AsyncIterator[object]:
     yield {}
 
 
-class Server(Generic[LifespanResultT]):
+class Server(Generic[LifespanResultT, RequestT]):
     def __init__(
         self,
         name: str,
         version: str | None = None,
         instructions: str | None = None,
         lifespan: Callable[
-            [Server[LifespanResultT]], AbstractAsyncContextManager[LifespanResultT]
+            [Server[LifespanResultT, RequestT]],
+            AbstractAsyncContextManager[LifespanResultT],
         ] = lifespan,
     ):
         self.name = name
@@ -143,14 +146,12 @@ class Server(Generic[LifespanResultT]):
         #   类型提示:
         #       在类型注释中使用 Awaitable 可以帮助开发者明确函数的返回值是可以异步等待的。这对代码的可读性和维护性非常有帮助。
         #       例如，函数可能返回一个协程对象、Future 对象或其他实现了 Awaitable 协议的对象。
-        self.request_handlers: dict[
-            type, Callable[..., Awaitable[types.ServerResult]]
-        ] = {
+        self.request_handlers: dict[type, Callable[..., Awaitable[types.ServerResult]]] = {
             types.PingRequest: _ping_handler,
         }
         self.notification_handlers: dict[type, Callable[..., Awaitable[None]]] = {}
         self.notification_options = NotificationOptions()
-        logger.debug(f"Initializing server '{name}'")
+        logger.debug("Initializing server %r", name)
 
     def create_initialization_options(
         self,
@@ -192,9 +193,7 @@ class Server(Generic[LifespanResultT]):
 
         # Set prompt capabilities if handler exists
         if types.ListPromptsRequest in self.request_handlers:
-            prompts_capability = types.PromptsCapability(
-                listChanged=notification_options.prompts_changed
-            )
+            prompts_capability = types.PromptsCapability(listChanged=notification_options.prompts_changed)
 
         # Set resource capabilities if handler exists
         if types.ListResourcesRequest in self.request_handlers:
@@ -204,9 +203,7 @@ class Server(Generic[LifespanResultT]):
 
         # Set tool capabilities if handler exists
         if types.ListToolsRequest in self.request_handlers:
-            tools_capability = types.ToolsCapability(
-                listChanged=notification_options.tools_changed
-            )
+            tools_capability = types.ToolsCapability(listChanged=notification_options.tools_changed)
 
         # Set logging capabilities if handler exists
         if types.SetLevelRequest in self.request_handlers:
@@ -221,7 +218,9 @@ class Server(Generic[LifespanResultT]):
         )
 
     @property
-    def request_context(self) -> RequestContext[ServerSession, LifespanResultT]:
+    def request_context(
+        self,
+    ) -> RequestContext[ServerSession, LifespanResultT, RequestT]:
         """If called outside of a request context, this will raise a LookupError."""
         return request_ctx.get()
 
@@ -240,9 +239,7 @@ class Server(Generic[LifespanResultT]):
 
     def get_prompt(self):
         def decorator(
-            func: Callable[
-                [str, dict[str, str] | None], Awaitable[types.GetPromptResult]
-            ],
+            func: Callable[[str, dict[str, str] | None], Awaitable[types.GetPromptResult]],
         ):
             logger.debug("Registering handler for GetPromptRequest")
 
@@ -261,9 +258,7 @@ class Server(Generic[LifespanResultT]):
 
             async def handler(_: Any):
                 resources = await func()
-                return types.ServerResult(
-                    types.ListResourcesResult(resources=resources)
-                )
+                return types.ServerResult(types.ListResourcesResult(resources=resources))
 
             self.request_handlers[types.ListResourcesRequest] = handler
             return func
@@ -276,9 +271,7 @@ class Server(Generic[LifespanResultT]):
 
             async def handler(_: Any):
                 templates = await func()
-                return types.ServerResult(
-                    types.ListResourceTemplatesResult(resourceTemplates=templates)
-                )
+                return types.ServerResult(types.ListResourceTemplatesResult(resourceTemplates=templates))
 
             self.request_handlers[types.ListResourceTemplatesRequest] = handler
             return func
@@ -287,9 +280,7 @@ class Server(Generic[LifespanResultT]):
 
     def read_resource(self):
         def decorator(
-            func: Callable[
-                [AnyUrl], Awaitable[str | bytes | Iterable[ReadResourceContents]]
-            ],
+            func: Callable[[AnyUrl], Awaitable[str | bytes | Iterable[ReadResourceContents]]],
         ):
             logger.debug("Registering handler for ReadResourceRequest")
 
@@ -338,8 +329,7 @@ class Server(Generic[LifespanResultT]):
                     # 返回一个 types.ServerResult，包含处理后的内容。
                     case Iterable() as contents:
                         contents_list = [
-                            create_content(content_item.content, content_item.mime_type)
-                            for content_item in contents
+                            create_content(content_item.content, content_item.mime_type) for content_item in contents
                         ]
                         return types.ServerResult(
                             types.ReadResourceResult(
@@ -347,9 +337,7 @@ class Server(Generic[LifespanResultT]):
                             )
                         )
                     case _:
-                        raise ValueError(
-                            f"Unexpected return type from read_resource: {type(result)}"
-                        )
+                        raise ValueError(f"Unexpected return type from read_resource: {type(result)}")
 
                 return types.ServerResult(
                     types.ReadResourceResult(
@@ -418,11 +406,7 @@ class Server(Generic[LifespanResultT]):
         def decorator(
             func: Callable[
                 ...,
-                Awaitable[
-                    Iterable[
-                        types.TextContent | types.ImageContent | types.EmbeddedResource
-                    ]
-                ],
+                Awaitable[Iterable[types.Content]],
             ],
         ):
             logger.debug("Registering handler for CallToolRequest")
@@ -430,9 +414,7 @@ class Server(Generic[LifespanResultT]):
             async def handler(req: types.CallToolRequest):
                 try:
                     results = await func(req.params.name, (req.params.arguments or {}))
-                    return types.ServerResult(
-                        types.CallToolResult(content=list(results), isError=False)
-                    )
+                    return types.ServerResult(types.CallToolResult(content=list(results), isError=False))
                 except Exception as e:
                     return types.ServerResult(
                         types.CallToolResult(
@@ -448,13 +430,16 @@ class Server(Generic[LifespanResultT]):
 
     def progress_notification(self):
         def decorator(
-            func: Callable[[str | int, float, float | None], Awaitable[None]],
+            func: Callable[[str | int, float, float | None, str | None], Awaitable[None]],
         ):
             logger.debug("Registering handler for ProgressNotification")
 
             async def handler(req: types.ProgressNotification):
                 await func(
-                    req.params.progressToken, req.params.progress, req.params.total
+                    req.params.progressToken,
+                    req.params.progress,
+                    req.params.total,
+                    req.params.message,
                 )
 
             self.notification_handlers[types.ProgressNotification] = handler
@@ -468,7 +453,7 @@ class Server(Generic[LifespanResultT]):
         def decorator(
             func: Callable[
                 [
-                    types.PromptReference | types.ResourceReference,
+                    types.PromptReference | types.ResourceTemplateReference,
                     types.CompletionArgument,
                 ],
                 Awaitable[types.Completion | None],
@@ -493,24 +478,34 @@ class Server(Generic[LifespanResultT]):
 
     async def run(
         self,
-        read_stream: MemoryObjectReceiveStream[types.JSONRPCMessage | Exception],
-        write_stream: MemoryObjectSendStream[types.JSONRPCMessage],
+        read_stream: MemoryObjectReceiveStream[SessionMessage | Exception],
+        write_stream: MemoryObjectSendStream[SessionMessage],
         initialization_options: InitializationOptions,
         # When False, exceptions are returned as messages to the client.
         # When True, exceptions are raised, which will cause the server to shut down
         # but also make tracing exceptions much easier during testing and when using
         # in-process servers.
         raise_exceptions: bool = False,
+        # When True, the server is stateless and
+        # clients can perform initialization with any node. The client must still follow
+        # the initialization lifecycle, but can do so with any available node
+        # rather than requiring initialization for each connection.
+        stateless: bool = False,
     ):
         async with AsyncExitStack() as stack:
             lifespan_context = await stack.enter_async_context(self.lifespan(self))
             session = await stack.enter_async_context(
-                ServerSession(read_stream, write_stream, initialization_options)
+                ServerSession(
+                    read_stream,
+                    write_stream,
+                    initialization_options,
+                    stateless=stateless,
+                )
             )
 
             async with anyio.create_task_group() as tg:
                 async for message in session.incoming_messages:
-                    logger.debug(f"Received message: {message}")
+                    logger.debug("Received message: %s", message)
 
                     tg.start_soon(
                         self._handle_message,
@@ -522,9 +517,7 @@ class Server(Generic[LifespanResultT]):
 
     async def _handle_message(
         self,
-        message: RequestResponder[types.ClientRequest, types.ServerResult]
-        | types.ClientNotification
-        | Exception,
+        message: RequestResponder[types.ClientRequest, types.ServerResult] | types.ClientNotification | Exception,
         session: ServerSession,
         lifespan_context: LifespanResultT,
         raise_exceptions: bool = False,
@@ -532,29 +525,25 @@ class Server(Generic[LifespanResultT]):
         with warnings.catch_warnings(record=True) as w:
             # TODO(Marcelo): We should be checking if message is Exception here.
             match message:  # type: ignore[reportMatchNotExhaustive]
-                case (
-                    # 模式匹配:
-                    #   case 语句尝试匹配 message 的结构和内容。
-                    #   它匹配的是 RequestResponder 类型的 message，其中有一个 request 属性，该属性应该匹配类型为 types.ClientRequest 的对象。
-                    # 嵌套匹配:
-                    #   request=types.ClientRequest(root=req) 进一步对 RequestResponder 的 request 属性进行结构匹配。
-                    #   types.ClientRequest(root=req) 表示 request 应该是一个 types.ClientRequest 对象，并且它有一个 root 属性。
-                    # 变量绑定:
-                    #   root=req 是模式匹配的一个部分，表示将 ClientRequest 对象的 root 属性的值绑定到变量 req。
-                    #   req 的值在匹配成功后可用于后续代码块。
-                    # 别名:
-                    #   as responder 用于将匹配成功的整个 RequestResponder 对象绑定到变量 responder。
-                    RequestResponder(request=types.ClientRequest(root=req)) as responder
-                ):
+                # 模式匹配:
+                #   case 语句尝试匹配 message 的结构和内容。
+                #   它匹配的是 RequestResponder 类型的 message，其中有一个 request 属性，该属性应该匹配类型为 types.ClientRequest 的对象。
+                # 嵌套匹配:
+                #   request=types.ClientRequest(root=req) 进一步对 RequestResponder 的 request 属性进行结构匹配。
+                #   types.ClientRequest(root=req) 表示 request 应该是一个 types.ClientRequest 对象，并且它有一个 root 属性。
+                # 变量绑定:
+                #   root=req 是模式匹配的一个部分，表示将 ClientRequest 对象的 root 属性的值绑定到变量 req。
+                #   req 的值在匹配成功后可用于后续代码块。
+                # 别名:
+                #   as responder 用于将匹配成功的整个 RequestResponder 对象绑定到变量 responder。
+                case RequestResponder(request=types.ClientRequest(root=req)) as responder:
                     with responder:
-                        await self._handle_request(
-                            message, req, session, lifespan_context, raise_exceptions
-                        )
+                        await self._handle_request(message, req, session, lifespan_context, raise_exceptions)
                 case types.ClientNotification(root=notify):
                     await self._handle_notification(notify)
 
             for warning in w:
-                logger.info(f"Warning: {warning.category.__name__}: {warning.message}")
+                logger.info("Warning: %s: %s", warning.category.__name__, warning.message)
 
     async def _handle_request(
         self,
@@ -564,13 +553,17 @@ class Server(Generic[LifespanResultT]):
         lifespan_context: LifespanResultT,
         raise_exceptions: bool,
     ):
-        logger.info(f"Processing request of type {type(req).__name__}")
-        if type(req) in self.request_handlers:
-            handler = self.request_handlers[type(req)]
-            logger.debug(f"Dispatching request of type {type(req).__name__}")
+        logger.info("Processing request of type %s", type(req).__name__)
+        if handler := self.request_handlers.get(type(req)):  # type: ignore
+            logger.debug("Dispatching request of type %s", type(req).__name__)
 
             token = None
             try:
+                # Extract request context from message metadata
+                request_data = None
+                if message.message_metadata is not None and isinstance(message.message_metadata, ServerMessageMetadata):
+                    request_data = message.message_metadata.request_context
+
                 # Set our global state that can be retrieved via
                 # app.get_request_context()
                 token = request_ctx.set(
@@ -579,6 +572,7 @@ class Server(Generic[LifespanResultT]):
                         message.request_meta,
                         session,
                         lifespan_context,
+                        request=request_data,
                     )
                 )
                 response = await handler(req)
@@ -605,18 +599,13 @@ class Server(Generic[LifespanResultT]):
         logger.debug("Response sent")
 
     async def _handle_notification(self, notify: Any):
-        if type(notify) in self.notification_handlers:
-            assert type(notify) in self.notification_handlers
-
-            handler = self.notification_handlers[type(notify)]
-            logger.debug(
-                f"Dispatching notification of type " f"{type(notify).__name__}"
-            )
+        if handler := self.notification_handlers.get(type(notify)):  # type: ignore
+            logger.debug("Dispatching notification of type %s", type(notify).__name__)
 
             try:
                 await handler(notify)
-            except Exception as err:
-                logger.error(f"Uncaught exception in notification handler: " f"{err}")
+            except Exception:
+                logger.exception("Uncaught exception in notification handler")
 
 
 async def _ping_handler(request: types.PingRequest) -> types.ServerResult:

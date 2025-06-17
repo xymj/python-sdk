@@ -1,15 +1,9 @@
 from collections.abc import Callable
-from typing import (
-    Annotated,
-    Any,
-    Generic,
-    Literal,
-    TypeAlias,
-    TypeVar,
-)
+from typing import Annotated, Any, Generic, Literal, TypeAlias, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, FileUrl, RootModel
 from pydantic.networks import AnyUrl, UrlConstraints
+from typing_extensions import deprecated
 
 """
 Model Context Protocol bindings for Python
@@ -29,12 +23,20 @@ for reference.
   not separate types in the schema.
 """
 
-LATEST_PROTOCOL_VERSION = "2024-11-05"
+LATEST_PROTOCOL_VERSION = "2025-03-26"
+
+"""
+The default negotiated version of the Model Context Protocol when no version is specified.
+We need this to satisfy the MCP specification, which requires the server to assume a
+specific version if none is provided by the client. See section "Protocol Version Header" at
+https://modelcontextprotocol.io/specification
+"""
+DEFAULT_NEGOTIATED_VERSION = "2025-03-26"
 
 ProgressToken = str | int
 Cursor = str
 Role = Literal["user", "assistant"]
-RequestId = str | int
+RequestId = Annotated[int | str, Field(union_mode="left_to_right")]
 AnyFunction: TypeAlias = Callable[..., Any]
 
 
@@ -53,21 +55,26 @@ class RequestParams(BaseModel):
     meta: Meta | None = Field(alias="_meta", default=None)
 
 
+class PaginatedRequestParams(RequestParams):
+    cursor: Cursor | None = None
+    """
+    An opaque token representing the current pagination position.
+    If provided, the server should return results starting after this cursor.
+    """
+
+
 class NotificationParams(BaseModel):
     class Meta(BaseModel):
         model_config = ConfigDict(extra="allow")
 
     meta: Meta | None = Field(alias="_meta", default=None)
     """
-    This parameter name is reserved by MCP to allow clients and servers to attach
-    additional metadata to their notifications.
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
     """
 
 
 RequestParamsT = TypeVar("RequestParamsT", bound=RequestParams | dict[str, Any] | None)
-NotificationParamsT = TypeVar(
-    "NotificationParamsT", bound=NotificationParams | dict[str, Any] | None
-)
+NotificationParamsT = TypeVar("NotificationParamsT", bound=NotificationParams | dict[str, Any] | None)
 MethodT = TypeVar("MethodT", bound=str)
 
 
@@ -79,12 +86,11 @@ class Request(BaseModel, Generic[RequestParamsT, MethodT]):
     model_config = ConfigDict(extra="allow")
 
 
-class PaginatedRequest(Request[RequestParamsT, MethodT]):
-    cursor: Cursor | None = None
-    """
-    An opaque token representing the current pagination position.
-    If provided, the server should return results starting after this cursor.
-    """
+class PaginatedRequest(Request[PaginatedRequestParams | None, MethodT], Generic[MethodT]):
+    """Base class for paginated requests,
+    matching the schema's PaginatedRequest interface."""
+
+    params: PaginatedRequestParams | None = None
 
 
 class Notification(BaseModel, Generic[NotificationParamsT, MethodT]):
@@ -98,13 +104,11 @@ class Notification(BaseModel, Generic[NotificationParamsT, MethodT]):
 class Result(BaseModel):
     """Base class for JSON-RPC results."""
 
-    model_config = ConfigDict(extra="allow")
-
     meta: dict[str, Any] | None = Field(alias="_meta", default=None)
     """
-    This result property is reserved by the protocol to allow clients and servers to
-    attach additional metadata to their responses.
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
     """
+    model_config = ConfigDict(extra="allow")
 
 
 class PaginatedResult(Result):
@@ -139,6 +143,10 @@ class JSONRPCResponse(BaseModel):
     result: dict[str, Any]
     model_config = ConfigDict(extra="allow")
 
+
+# SDK error codes
+CONNECTION_CLOSED = -32000
+# REQUEST_TIMEOUT = -32001  # the typescript sdk uses this
 
 # Standard JSON-RPC error codes
 PARSE_ERROR = -32700
@@ -178,9 +186,7 @@ class JSONRPCError(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class JSONRPCMessage(
-    RootModel[JSONRPCRequest | JSONRPCNotification | JSONRPCResponse | JSONRPCError]
-):
+class JSONRPCMessage(RootModel[JSONRPCRequest | JSONRPCNotification | JSONRPCResponse | JSONRPCError]):
     pass
 
 
@@ -205,7 +211,7 @@ class RootsCapability(BaseModel):
 
 
 class SamplingCapability(BaseModel):
-    """Capability for logging operations."""
+    """Capability for sampling operations."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -301,9 +307,7 @@ class InitializeResult(Result):
     """Instructions describing how to use the server and its features."""
 
 
-class InitializedNotification(
-    Notification[NotificationParams | None, Literal["notifications/initialized"]]
-):
+class InitializedNotification(Notification[NotificationParams | None, Literal["notifications/initialized"]]):
     """
     This notification is sent from the client to the server after initialization has
     finished.
@@ -338,12 +342,15 @@ class ProgressNotificationParams(NotificationParams):
     """
     total: float | None = None
     """Total number of items to process (or total progress required), if known."""
+    message: str | None = None
+    """
+    Message related to progress. This should provide relevant human readable
+    progress information.
+    """
     model_config = ConfigDict(extra="allow")
 
 
-class ProgressNotification(
-    Notification[ProgressNotificationParams, Literal["notifications/progress"]]
-):
+class ProgressNotification(Notification[ProgressNotificationParams, Literal["notifications/progress"]]):
     """
     An out-of-band notification used to inform the receiver of a progress update for a
     long-running request.
@@ -353,13 +360,10 @@ class ProgressNotification(
     params: ProgressNotificationParams
 
 
-class ListResourcesRequest(
-    PaginatedRequest[RequestParams | None, Literal["resources/list"]]
-):
+class ListResourcesRequest(PaginatedRequest[Literal["resources/list"]]):
     """Sent from the client to request a list of resources the server has."""
 
     method: Literal["resources/list"]
-    params: RequestParams | None = None
 
 
 class Annotations(BaseModel):
@@ -387,6 +391,10 @@ class Resource(BaseModel):
     This can be used by Hosts to display file sizes and estimate context window usage.
     """
     annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -408,6 +416,10 @@ class ResourceTemplate(BaseModel):
     included if all resources matching this template have the same type.
     """
     annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -417,13 +429,10 @@ class ListResourcesResult(PaginatedResult):
     resources: list[Resource]
 
 
-class ListResourceTemplatesRequest(
-    PaginatedRequest[RequestParams | None, Literal["resources/templates/list"]]
-):
+class ListResourceTemplatesRequest(PaginatedRequest[Literal["resources/templates/list"]]):
     """Sent from the client to request a list of resource templates the server has."""
 
     method: Literal["resources/templates/list"]
-    params: RequestParams | None = None
 
 
 class ListResourceTemplatesResult(PaginatedResult):
@@ -443,9 +452,7 @@ class ReadResourceRequestParams(RequestParams):
     model_config = ConfigDict(extra="allow")
 
 
-class ReadResourceRequest(
-    Request[ReadResourceRequestParams, Literal["resources/read"]]
-):
+class ReadResourceRequest(Request[ReadResourceRequestParams, Literal["resources/read"]]):
     """Sent from the client to the server, to read a specific resource URI."""
 
     method: Literal["resources/read"]
@@ -459,6 +466,10 @@ class ResourceContents(BaseModel):
     """The URI of this resource."""
     mimeType: str | None = None
     """The MIME type of this resource, if known."""
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -486,9 +497,7 @@ class ReadResourceResult(Result):
 
 
 class ResourceListChangedNotification(
-    Notification[
-        NotificationParams | None, Literal["notifications/resources/list_changed"]
-    ]
+    Notification[NotificationParams | None, Literal["notifications/resources/list_changed"]]
 ):
     """
     An optional notification from the server to the client, informing it that the list
@@ -528,9 +537,7 @@ class UnsubscribeRequestParams(RequestParams):
     model_config = ConfigDict(extra="allow")
 
 
-class UnsubscribeRequest(
-    Request[UnsubscribeRequestParams, Literal["resources/unsubscribe"]]
-):
+class UnsubscribeRequest(Request[UnsubscribeRequestParams, Literal["resources/unsubscribe"]]):
     """
     Sent from the client to request cancellation of resources/updated notifications from
     the server.
@@ -552,9 +559,7 @@ class ResourceUpdatedNotificationParams(NotificationParams):
 
 
 class ResourceUpdatedNotification(
-    Notification[
-        ResourceUpdatedNotificationParams, Literal["notifications/resources/updated"]
-    ]
+    Notification[ResourceUpdatedNotificationParams, Literal["notifications/resources/updated"]]
 ):
     """
     A notification from the server to the client, informing it that a resource has
@@ -565,13 +570,10 @@ class ResourceUpdatedNotification(
     params: ResourceUpdatedNotificationParams
 
 
-class ListPromptsRequest(
-    PaginatedRequest[RequestParams | None, Literal["prompts/list"]]
-):
+class ListPromptsRequest(PaginatedRequest[Literal["prompts/list"]]):
     """Sent from the client to request a list of prompts and prompt templates."""
 
     method: Literal["prompts/list"]
-    params: RequestParams | None = None
 
 
 class PromptArgument(BaseModel):
@@ -595,6 +597,10 @@ class Prompt(BaseModel):
     """An optional description of what this prompt provides."""
     arguments: list[PromptArgument] | None = None
     """A list of arguments to use for templating the prompt."""
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -628,6 +634,10 @@ class TextContent(BaseModel):
     text: str
     """The text content of the message."""
     annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -643,6 +653,29 @@ class ImageContent(BaseModel):
     image types.
     """
     annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
+    model_config = ConfigDict(extra="allow")
+
+
+class AudioContent(BaseModel):
+    """Audio content for a message."""
+
+    type: Literal["audio"]
+    data: str
+    """The base64-encoded audio data."""
+    mimeType: str
+    """
+    The MIME type of the audio. Different providers may support different
+    audio types.
+    """
+    annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -650,7 +683,7 @@ class SamplingMessage(BaseModel):
     """Describes a message issued to or received from an LLM API."""
 
     role: Role
-    content: TextContent | ImageContent
+    content: TextContent | ImageContent | AudioContent
     model_config = ConfigDict(extra="allow")
 
 
@@ -665,14 +698,21 @@ class EmbeddedResource(BaseModel):
     type: Literal["resource"]
     resource: TextResourceContents | BlobResourceContents
     annotations: Annotations | None = None
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
+
+
+Content = TextContent | ImageContent | AudioContent | EmbeddedResource
 
 
 class PromptMessage(BaseModel):
     """Describes a message returned as part of a prompt."""
 
     role: Role
-    content: TextContent | ImageContent | EmbeddedResource
+    content: Content
     model_config = ConfigDict(extra="allow")
 
 
@@ -685,9 +725,7 @@ class GetPromptResult(Result):
 
 
 class PromptListChangedNotification(
-    Notification[
-        NotificationParams | None, Literal["notifications/prompts/list_changed"]
-    ]
+    Notification[NotificationParams | None, Literal["notifications/prompts/list_changed"]]
 ):
     """
     An optional notification from the server to the client, informing it that the list
@@ -698,11 +736,58 @@ class PromptListChangedNotification(
     params: NotificationParams | None = None
 
 
-class ListToolsRequest(PaginatedRequest[RequestParams | None, Literal["tools/list"]]):
+class ListToolsRequest(PaginatedRequest[Literal["tools/list"]]):
     """Sent from the client to request a list of tools the server has."""
 
     method: Literal["tools/list"]
-    params: RequestParams | None = None
+
+
+class ToolAnnotations(BaseModel):
+    """
+    Additional properties describing a Tool to clients.
+
+    NOTE: all properties in ToolAnnotations are **hints**.
+    They are not guaranteed to provide a faithful description of
+    tool behavior (including descriptive properties like `title`).
+
+    Clients should never make tool use decisions based on ToolAnnotations
+    received from untrusted servers.
+    """
+
+    title: str | None = None
+    """A human-readable title for the tool."""
+
+    readOnlyHint: bool | None = None
+    """
+    If true, the tool does not modify its environment.
+    Default: false
+    """
+
+    destructiveHint: bool | None = None
+    """
+    If true, the tool may perform destructive updates to its environment.
+    If false, the tool performs only additive updates.
+    (This property is meaningful only when `readOnlyHint == false`)
+    Default: true
+    """
+
+    idempotentHint: bool | None = None
+    """
+    If true, calling the tool repeatedly with the same arguments
+    will have no additional effect on the its environment.
+    (This property is meaningful only when `readOnlyHint == false`)
+    Default: false
+    """
+
+    openWorldHint: bool | None = None
+    """
+    If true, this tool may interact with an "open world" of external
+    entities. If false, the tool's domain of interaction is closed.
+    For example, the world of a web search tool is open, whereas that
+    of a memory tool is not.
+    Default: true
+    """
+    model_config = ConfigDict(extra="allow")
 
 
 class Tool(BaseModel):
@@ -714,6 +799,12 @@ class Tool(BaseModel):
     """A human-readable description of the tool."""
     inputSchema: dict[str, Any]
     """A JSON Schema object defining the expected parameters for the tool."""
+    annotations: ToolAnnotations | None = None
+    """Optional additional tool information."""
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -741,13 +832,11 @@ class CallToolRequest(Request[CallToolRequestParams, Literal["tools/call"]]):
 class CallToolResult(Result):
     """The server's response to a tool call."""
 
-    content: list[TextContent | ImageContent | EmbeddedResource]
+    content: list[Content]
     isError: bool = False
 
 
-class ToolListChangedNotification(
-    Notification[NotificationParams | None, Literal["notifications/tools/list_changed"]]
-):
+class ToolListChangedNotification(Notification[NotificationParams | None, Literal["notifications/tools/list_changed"]]):
     """
     An optional notification from the server to the client, informing it that the list
     of tools it offers has changed.
@@ -757,9 +846,7 @@ class ToolListChangedNotification(
     params: NotificationParams | None = None
 
 
-LoggingLevel = Literal[
-    "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"
-]
+LoggingLevel = Literal["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
 
 
 class SetLevelRequestParams(RequestParams):
@@ -792,9 +879,7 @@ class LoggingMessageNotificationParams(NotificationParams):
     model_config = ConfigDict(extra="allow")
 
 
-class LoggingMessageNotification(
-    Notification[LoggingMessageNotificationParams, Literal["notifications/message"]]
-):
+class LoggingMessageNotification(Notification[LoggingMessageNotificationParams, Literal["notifications/message"]]):
     """Notification of a log message passed from server to client."""
 
     method: Literal["notifications/message"]
@@ -889,9 +974,7 @@ class CreateMessageRequestParams(RequestParams):
     model_config = ConfigDict(extra="allow")
 
 
-class CreateMessageRequest(
-    Request[CreateMessageRequestParams, Literal["sampling/createMessage"]]
-):
+class CreateMessageRequest(Request[CreateMessageRequestParams, Literal["sampling/createMessage"]]):
     """A request from the server to sample an LLM via the client."""
 
     method: Literal["sampling/createMessage"]
@@ -905,20 +988,25 @@ class CreateMessageResult(Result):
     """The client's response to a sampling/create_message request from the server."""
 
     role: Role
-    content: TextContent | ImageContent
+    content: TextContent | ImageContent | AudioContent
     model: str
     """The name of the model that generated the message."""
     stopReason: StopReason | None = None
     """The reason why sampling stopped, if known."""
 
 
-class ResourceReference(BaseModel):
+class ResourceTemplateReference(BaseModel):
     """A reference to a resource or resource template definition."""
 
     type: Literal["ref/resource"]
     uri: str
     """The URI or URI template of the resource."""
     model_config = ConfigDict(extra="allow")
+
+
+@deprecated("`ResourceReference` is deprecated, you should use `ResourceTemplateReference`.")
+class ResourceReference(ResourceTemplateReference):
+    pass
 
 
 class PromptReference(BaseModel):
@@ -943,7 +1031,7 @@ class CompletionArgument(BaseModel):
 class CompleteRequestParams(RequestParams):
     """Parameters for completion requests."""
 
-    ref: ResourceReference | PromptReference
+    ref: ResourceTemplateReference | PromptReference
     argument: CompletionArgument
     model_config = ConfigDict(extra="allow")
 
@@ -1009,6 +1097,10 @@ class Root(BaseModel):
     identifier for the root, which may be useful for display purposes or for
     referencing the root in other parts of the application.
     """
+    meta: dict[str, Any] | None = Field(alias="_meta", default=None)
+    """
+    Reserved by MCP for protocol-level metadata; implementations must not make assumptions about its contents.
+    """
     model_config = ConfigDict(extra="allow")
 
 
@@ -1048,9 +1140,7 @@ class CancelledNotificationParams(NotificationParams):
     model_config = ConfigDict(extra="allow")
 
 
-class CancelledNotification(
-    Notification[CancelledNotificationParams, Literal["notifications/cancelled"]]
-):
+class CancelledNotification(Notification[CancelledNotificationParams, Literal["notifications/cancelled"]]):
     """
     This notification can be sent by either side to indicate that it is canceling a
     previously-issued request.
@@ -1093,12 +1183,7 @@ class ClientRequest(
 
 
 class ClientNotification(
-    RootModel[
-        CancelledNotification
-        | ProgressNotification
-        | InitializedNotification
-        | RootsListChangedNotification
-    ]
+    RootModel[CancelledNotification | ProgressNotification | InitializedNotification | RootsListChangedNotification]
 ):
     pass
 

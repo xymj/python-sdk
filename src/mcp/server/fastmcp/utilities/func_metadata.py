@@ -108,9 +108,7 @@ class FuncMetadata(BaseModel):
     )
 
 
-def func_metadata(
-    func: Callable[..., Any], skip_names: Sequence[str] = ()
-) -> FuncMetadata:
+def func_metadata(func: Callable[..., Any], skip_names: Sequence[str] = ()) -> FuncMetadata:
     """Given a function, return metadata including a pydantic model representing its
     signature.
 
@@ -137,9 +135,7 @@ def func_metadata(
     globalns = getattr(func, "__globals__", {})
     for param in params.values():
         if param.name.startswith("_"):
-            raise InvalidSignature(
-                f"Parameter {param.name} of {func.__name__} cannot start with '_'"
-            )
+            raise InvalidSignature(f"Parameter {param.name} of {func.__name__} cannot start with '_'")
         if param.name in skip_names:
             continue
         annotation = param.annotation
@@ -148,11 +144,7 @@ def func_metadata(
         if annotation is None:
             annotation = Annotated[
                 None,
-                Field(
-                    default=param.default
-                    if param.default is not inspect.Parameter.empty
-                    else PydanticUndefined
-                ),
+                Field(default=param.default if param.default is not inspect.Parameter.empty else PydanticUndefined),
             ]
 
         # Untyped field
@@ -166,9 +158,7 @@ def func_metadata(
 
         field_info = FieldInfo.from_annotated_attribute(
             _get_typed_annotation(annotation, globalns),
-            param.default
-            if param.default is not inspect.Parameter.empty
-            else PydanticUndefined,
+            param.default if param.default is not inspect.Parameter.empty else PydanticUndefined,
         )
         dynamic_pydantic_model_params[param.name] = (field_info.annotation, field_info)
         continue
@@ -184,9 +174,7 @@ def func_metadata(
 # 描述: 解析类型注解，考虑可能的前向引用。
 # 参数: annotation 是类型注解，globalns 是全局命名空间。
 def _get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -> Any:
-    def try_eval_type(
-        value: Any, globalns: dict[str, Any], localns: dict[str, Any]
-    ) -> tuple[Any, bool]:
+    def try_eval_type(value: Any, globalns: dict[str, Any], localns: dict[str, Any]) -> tuple[Any, bool]:
         try:
             return eval_type_backport(value, globalns, localns), True
         except NameError:

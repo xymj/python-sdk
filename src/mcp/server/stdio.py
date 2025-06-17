@@ -27,6 +27,7 @@ import anyio.lowlevel
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 import mcp.types as types
+from mcp.shared.message import SessionMessage
 
 # anyio.AsyncFile 是 anyio 库中的一个类，它提供了对文件进行异步操作的接口。
 # 与传统的同步文件 I/O 不同，AsyncFile 允许在异步编程环境中使用 await 语义来执行文件操作，从而使得这些操作不会阻塞事件循环。
@@ -68,11 +69,11 @@ async def stdio_server(
         # 使用 anyio.wrap_file 将文本流对象转换为异步兼容的对象
         stdout = anyio.wrap_file(TextIOWrapper(sys.stdout.buffer, encoding="utf-8"))
 
-    read_stream: MemoryObjectReceiveStream[types.JSONRPCMessage | Exception]
-    read_stream_writer: MemoryObjectSendStream[types.JSONRPCMessage | Exception]
+    read_stream: MemoryObjectReceiveStream[SessionMessage | Exception]
+    read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception]
 
-    write_stream: MemoryObjectSendStream[types.JSONRPCMessage]
-    write_stream_reader: MemoryObjectReceiveStream[types.JSONRPCMessage]
+    write_stream: MemoryObjectSendStream[SessionMessage]
+    write_stream_reader: MemoryObjectReceiveStream[SessionMessage]
 
     read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
     write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
@@ -88,15 +89,16 @@ async def stdio_server(
                         await read_stream_writer.send(exc)
                         continue
 
-                    await read_stream_writer.send(message)
+                    session_message = SessionMessage(message)
+                    await read_stream_writer.send(session_message)
         except anyio.ClosedResourceError:
             await anyio.lowlevel.checkpoint()
 
     async def stdout_writer():
         try:
             async with write_stream_reader:
-                async for message in write_stream_reader:
-                    json = message.model_dump_json(by_alias=True, exclude_none=True)
+                async for session_message in write_stream_reader:
+                    json = session_message.message.model_dump_json(by_alias=True, exclude_none=True)
                     # await stdout.write(line) 允许异步地写入输出。
                     await stdout.write(json + "\n")
                     # await stdout.flush() 用于确保所有缓冲区的数据都被写入输出。

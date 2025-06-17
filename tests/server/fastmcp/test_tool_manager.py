@@ -6,9 +6,11 @@ from pydantic import BaseModel
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.fastmcp.tools import ToolManager
+from mcp.server.fastmcp.tools import Tool, ToolManager
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase, FuncMetadata
 from mcp.server.session import ServerSessionT
-from mcp.shared.context import LifespanContextT
+from mcp.shared.context import LifespanContextT, RequestT
+from mcp.types import ToolAnnotations
 
 
 class TestAddTools:
@@ -29,6 +31,35 @@ class TestAddTools:
         assert tool.is_async is False
         assert tool.parameters["properties"]["a"]["type"] == "integer"
         assert tool.parameters["properties"]["b"]["type"] == "integer"
+
+    def test_init_with_tools(self, caplog):
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        class AddArguments(ArgModelBase):
+            a: int
+            b: int
+
+        fn_metadata = FuncMetadata(arg_model=AddArguments)
+
+        original_tool = Tool(
+            name="add",
+            description="Add two numbers.",
+            fn=add,
+            fn_metadata=fn_metadata,
+            is_async=False,
+            parameters=AddArguments.model_json_schema(),
+            context_kwarg=None,
+            annotations=None,
+        )
+        manager = ToolManager(tools=[original_tool])
+        saved_tool = manager.get_tool("add")
+        assert saved_tool == original_tool
+
+        # warn on duplicate tools
+        with caplog.at_level(logging.WARNING):
+            manager = ToolManager(True, tools=[original_tool, original_tool])
+            assert "Tool already exists: add" in caplog.text
 
     @pytest.mark.anyio
     async def test_async_function(self):
@@ -71,6 +102,39 @@ class TestAddTools:
         assert "age" in tool.parameters["$defs"]["UserInput"]["properties"]
         assert "flag" in tool.parameters["properties"]
 
+    def test_add_callable_object(self):
+        """Test registering a callable object."""
+
+        class MyTool:
+            def __init__(self):
+                self.__name__ = "MyTool"
+
+            def __call__(self, x: int) -> int:
+                return x * 2
+
+        manager = ToolManager()
+        tool = manager.add_tool(MyTool())
+        assert tool.name == "MyTool"
+        assert tool.is_async is False
+        assert tool.parameters["properties"]["x"]["type"] == "integer"
+
+    @pytest.mark.anyio
+    async def test_add_async_callable_object(self):
+        """Test registering an async callable object."""
+
+        class MyAsyncTool:
+            def __init__(self):
+                self.__name__ = "MyAsyncTool"
+
+            async def __call__(self, x: int) -> int:
+                return x * 2
+
+        manager = ToolManager()
+        tool = manager.add_tool(MyAsyncTool())
+        assert tool.name == "MyAsyncTool"
+        assert tool.is_async is True
+        assert tool.parameters["properties"]["x"]["type"] == "integer"
+
     def test_add_invalid_tool(self):
         manager = ToolManager()
         with pytest.raises(AttributeError):
@@ -83,9 +147,7 @@ class TestAddTools:
 
     def test_add_lambda_with_no_name(self):
         manager = ToolManager()
-        with pytest.raises(
-            ValueError, match="You must provide a name for lambda functions"
-        ):
+        with pytest.raises(ValueError, match="You must provide a name for lambda functions"):
             manager.add_tool(lambda x: x)
 
     def test_warn_on_duplicate_tools(self, caplog):
@@ -135,6 +197,34 @@ class TestCallTools:
         manager = ToolManager()
         manager.add_tool(double)
         result = await manager.call_tool("double", {"n": 5})
+        assert result == 10
+
+    @pytest.mark.anyio
+    async def test_call_object_tool(self):
+        class MyTool:
+            def __init__(self):
+                self.__name__ = "MyTool"
+
+            def __call__(self, x: int) -> int:
+                return x * 2
+
+        manager = ToolManager()
+        tool = manager.add_tool(MyTool())
+        result = await tool.run({"x": 5})
+        assert result == 10
+
+    @pytest.mark.anyio
+    async def test_call_async_object_tool(self):
+        class MyAsyncTool:
+            def __init__(self):
+                self.__name__ = "MyAsyncTool"
+
+            async def __call__(self, x: int) -> int:
+                return x * 2
+
+        manager = ToolManager()
+        tool = manager.add_tool(MyAsyncTool())
+        result = await tool.run({"x": 5})
         assert result == 10
 
     @pytest.mark.anyio
@@ -254,9 +344,7 @@ class TestContextHandling:
         tool = manager.add_tool(tool_without_context)
         assert tool.context_kwarg is None
 
-        def tool_with_parametrized_context(
-            x: int, ctx: Context[ServerSessionT, LifespanContextT]
-        ) -> str:
+        def tool_with_parametrized_context(x: int, ctx: Context[ServerSessionT, LifespanContextT, RequestT]) -> str:
             return str(x)
 
         tool = manager.add_tool(tool_with_parametrized_context)
@@ -321,3 +409,43 @@ class TestContextHandling:
         ctx = mcp.get_context()
         with pytest.raises(ToolError, match="Error executing tool tool_with_context"):
             await manager.call_tool("tool_with_context", {"x": 42}, context=ctx)
+
+
+class TestToolAnnotations:
+    def test_tool_annotations(self):
+        """Test that tool annotations are correctly added to tools."""
+
+        def read_data(path: str) -> str:
+            """Read data from a file."""
+            return f"Data from {path}"
+
+        annotations = ToolAnnotations(
+            title="File Reader",
+            readOnlyHint=True,
+            openWorldHint=False,
+        )
+
+        manager = ToolManager()
+        tool = manager.add_tool(read_data, annotations=annotations)
+
+        assert tool.annotations is not None
+        assert tool.annotations.title == "File Reader"
+        assert tool.annotations.readOnlyHint is True
+        assert tool.annotations.openWorldHint is False
+
+    @pytest.mark.anyio
+    async def test_tool_annotations_in_fastmcp(self):
+        """Test that tool annotations are included in MCPTool conversion."""
+
+        app = FastMCP()
+
+        @app.tool(annotations=ToolAnnotations(title="Echo Tool", readOnlyHint=True))
+        def echo(message: str) -> str:
+            """Echo a message back."""
+            return message
+
+        tools = await app.list_tools()
+        assert len(tools) == 1
+        assert tools[0].annotations is not None
+        assert tools[0].annotations.title == "Echo Tool"
+        assert tools[0].annotations.readOnlyHint is True

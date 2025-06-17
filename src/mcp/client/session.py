@@ -7,7 +7,8 @@ from pydantic import AnyUrl, TypeAdapter
 
 import mcp.types as types
 from mcp.shared.context import RequestContext
-from mcp.shared.session import BaseSession, RequestResponder
+from mcp.shared.message import SessionMessage
+from mcp.shared.session import BaseSession, ProgressFnT, RequestResponder
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
 DEFAULT_CLIENT_INFO = types.Implementation(name="mcp", version="0.1.0")
@@ -51,16 +52,12 @@ class LoggingFnT(Protocol):
 class MessageHandlerFnT(Protocol):
     async def __call__(
         self,
-        message: RequestResponder[types.ServerRequest, types.ClientResult]
-        | types.ServerNotification
-        | Exception,
+        message: RequestResponder[types.ServerRequest, types.ClientResult] | types.ServerNotification | Exception,
     ) -> None: ...
 
 
 async def _default_message_handler(
-    message: RequestResponder[types.ServerRequest, types.ClientResult]
-    | types.ServerNotification
-    | Exception,
+    message: RequestResponder[types.ServerRequest, types.ClientResult] | types.ServerNotification | Exception,
 ) -> None:
     await anyio.lowlevel.checkpoint()
 
@@ -92,9 +89,7 @@ async def _default_logging_callback(
 # ClientResponse 是一个变量，类型为 TypeAdapter。它适配两种可能的类型：types.ClientResult 和 types.ErrorData。
 # 创建一个 TypeAdapter 实例，适配 types.ClientResult 或 types.ErrorData 类型。
 # 用于在运行时检查和转换数据类型，以确保数据符合预期的类型。
-ClientResponse: TypeAdapter[types.ClientResult | types.ErrorData] = TypeAdapter(
-    types.ClientResult | types.ErrorData
-)
+ClientResponse: TypeAdapter[types.ClientResult | types.ErrorData] = TypeAdapter(types.ClientResult | types.ErrorData)
 
 
 class ClientSession(
@@ -108,8 +103,8 @@ class ClientSession(
 ):
     def __init__(
         self,
-        read_stream: MemoryObjectReceiveStream[types.JSONRPCMessage | Exception],
-        write_stream: MemoryObjectSendStream[types.JSONRPCMessage],
+        read_stream: MemoryObjectReceiveStream[SessionMessage | Exception],
+        write_stream: MemoryObjectSendStream[SessionMessage],
         read_timeout_seconds: timedelta | None = None,
         sampling_callback: SamplingFnT | None = None,
         list_roots_callback: ListRootsFnT | None = None,
@@ -131,12 +126,14 @@ class ClientSession(
         self._message_handler = message_handler or _default_message_handler
 
     async def initialize(self) -> types.InitializeResult:
-        sampling = types.SamplingCapability()
-        roots = types.RootsCapability(
+        sampling = types.SamplingCapability() if self._sampling_callback is not _default_sampling_callback else None
+        roots = (
             # TODO: Should this be based on whether we
             # _will_ send notifications, or only whether
             # they're supported?
-            listChanged=True,
+            types.RootsCapability(listChanged=True)
+            if self._list_roots_callback is not _default_list_roots_callback
+            else None
         )
 
         result = await self.send_request(
@@ -158,15 +155,10 @@ class ClientSession(
         )
 
         if result.protocolVersion not in SUPPORTED_PROTOCOL_VERSIONS:
-            raise RuntimeError(
-                "Unsupported protocol version from the server: "
-                f"{result.protocolVersion}"
-            )
+            raise RuntimeError("Unsupported protocol version from the server: " f"{result.protocolVersion}")
 
         await self.send_notification(
-            types.ClientNotification(
-                types.InitializedNotification(method="notifications/initialized")
-            )
+            types.ClientNotification(types.InitializedNotification(method="notifications/initialized"))
         )
 
         return result
@@ -183,7 +175,11 @@ class ClientSession(
         )
 
     async def send_progress_notification(
-        self, progress_token: str | int, progress: float, total: float | None = None
+        self,
+        progress_token: str | int,
+        progress: float,
+        total: float | None = None,
+        message: str | None = None,
     ) -> None:
         """Send a progress notification."""
         await self.send_notification(
@@ -194,6 +190,7 @@ class ClientSession(
                         progressToken=progress_token,
                         progress=progress,
                         total=total,
+                        message=message,
                     ),
                 ),
             )
@@ -211,23 +208,25 @@ class ClientSession(
             types.EmptyResult,
         )
 
-    async def list_resources(self) -> types.ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> types.ListResourcesResult:
         """Send a resources/list request."""
         return await self.send_request(
             types.ClientRequest(
                 types.ListResourcesRequest(
                     method="resources/list",
+                    params=types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None,
                 )
             ),
             types.ListResourcesResult,
         )
 
-    async def list_resource_templates(self) -> types.ListResourceTemplatesResult:
+    async def list_resource_templates(self, cursor: str | None = None) -> types.ListResourceTemplatesResult:
         """Send a resources/templates/list request."""
         return await self.send_request(
             types.ClientRequest(
                 types.ListResourceTemplatesRequest(
                     method="resources/templates/list",
+                    params=types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None,
                 )
             ),
             types.ListResourceTemplatesResult,
@@ -270,33 +269,42 @@ class ClientSession(
         )
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        read_timeout_seconds: timedelta | None = None,
+        progress_callback: ProgressFnT | None = None,
     ) -> types.CallToolResult:
-        """Send a tools/call request."""
+        """Send a tools/call request with optional progress callback support."""
+
         return await self.send_request(
             types.ClientRequest(
                 types.CallToolRequest(
                     method="tools/call",
-                    params=types.CallToolRequestParams(name=name, arguments=arguments),
+                    params=types.CallToolRequestParams(
+                        name=name,
+                        arguments=arguments,
+                    ),
                 )
             ),
             types.CallToolResult,
+            request_read_timeout_seconds=read_timeout_seconds,
+            progress_callback=progress_callback,
         )
 
-    async def list_prompts(self) -> types.ListPromptsResult:
+    async def list_prompts(self, cursor: str | None = None) -> types.ListPromptsResult:
         """Send a prompts/list request."""
         return await self.send_request(
             types.ClientRequest(
                 types.ListPromptsRequest(
                     method="prompts/list",
+                    params=types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None,
                 )
             ),
             types.ListPromptsResult,
         )
 
-    async def get_prompt(
-        self, name: str, arguments: dict[str, str] | None = None
-    ) -> types.GetPromptResult:
+    async def get_prompt(self, name: str, arguments: dict[str, str] | None = None) -> types.GetPromptResult:
         """Send a prompts/get request."""
         return await self.send_request(
             types.ClientRequest(
@@ -310,7 +318,7 @@ class ClientSession(
 
     async def complete(
         self,
-        ref: types.ResourceReference | types.PromptReference,
+        ref: types.ResourceTemplateReference | types.PromptReference,
         argument: dict[str, str],
     ) -> types.CompleteResult:
         """Send a completion/complete request."""
@@ -327,12 +335,13 @@ class ClientSession(
             types.CompleteResult,
         )
 
-    async def list_tools(self) -> types.ListToolsResult:
+    async def list_tools(self, cursor: str | None = None) -> types.ListToolsResult:
         """Send a tools/list request."""
         return await self.send_request(
             types.ClientRequest(
                 types.ListToolsRequest(
                     method="tools/list",
+                    params=types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None,
                 )
             ),
             types.ListToolsResult,
@@ -348,9 +357,7 @@ class ClientSession(
             )
         )
 
-    async def _received_request(
-        self, responder: RequestResponder[types.ServerRequest, types.ClientResult]
-    ) -> None:
+    async def _received_request(self, responder: RequestResponder[types.ServerRequest, types.ClientResult]) -> None:
         ctx = RequestContext[ClientSession, Any](
             request_id=responder.request_id,
             meta=responder.request_meta,
@@ -373,22 +380,16 @@ class ClientSession(
 
             case types.PingRequest():
                 with responder:
-                    return await responder.respond(
-                        types.ClientResult(root=types.EmptyResult())
-                    )
+                    return await responder.respond(types.ClientResult(root=types.EmptyResult()))
 
     async def _handle_incoming(
         self,
-        req: RequestResponder[types.ServerRequest, types.ClientResult]
-        | types.ServerNotification
-        | Exception,
+        req: RequestResponder[types.ServerRequest, types.ClientResult] | types.ServerNotification | Exception,
     ) -> None:
         """Handle incoming messages by forwarding to the message handler."""
         await self._message_handler(req)
 
-    async def _received_notification(
-        self, notification: types.ServerNotification
-    ) -> None:
+    async def _received_notification(self, notification: types.ServerNotification) -> None:
         """Handle notifications from the server."""
         # Process specific notification types
         match notification.root:
