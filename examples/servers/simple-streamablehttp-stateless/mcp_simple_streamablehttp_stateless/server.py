@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import sys
 from collections.abc import AsyncIterator
 
 import anyio
@@ -137,3 +138,6 @@ def main(
     uvicorn.run(starlette_app, host="127.0.0.1", port=port)
 
     return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
