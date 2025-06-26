@@ -14,7 +14,19 @@ from starlette.types import Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
-
+"""
+@click.command() 的作用
+将被装饰的函数转换为命令行可执行的入口点。
+例如，代码中的函数会被封装为一个 CLI 命令，用户可通过命令行直接运行脚本并调用该函数。
+示例：
+    @click.command()
+    def main():
+        click.echo("Hello, CLI!")
+    运行方式：python script.py。
+    
+@click.option() 的作用
+为命令行接口添加选项（options）和参数（arguments），支持用户通过命令行传递配置或输入值
+"""
 @click.command()
 @click.option("--port", default=3000, help="Port to listen on for HTTP")
 @click.option(
@@ -138,6 +150,3 @@ def main(
     uvicorn.run(starlette_app, host="127.0.0.1", port=port)
 
     return 0
-
-if __name__ == "__main__":
-    sys.exit(main())

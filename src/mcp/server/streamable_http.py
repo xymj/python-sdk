@@ -257,7 +257,74 @@ class StreamableHTTPServerTransport:
                 "Not Found: Session has been terminated",
                 HTTPStatus.NOT_FOUND,
             )
+            # 在 ASGI（Asynchronous Server Gateway Interface）中，最后一行 response(scope, receive, send) 的作用是 调用 ASGI 响应对象的 __call__ 方法，将构建好的 HTTP 响应发送到客户端。具体分析如下：
+            # response 是通过 self._create_error_response(...) 创建的，通常是一个实现了 ASGI 协议的响应对象（如 Starlette 的 Response 类）。此类对象通常具有以下特性：
+
+            # 实现 __call__(self, scope, receive, send) 方法，符合 ASGI 应用的接口规范。
+            # 内部封装了 HTTP 响应的逻辑（如状态码、头部、正文等），并通过 send 函数将响应数据发送到客户端。
+
+            # 2. 调用 response(scope, receive, send) 的作用
+            # 此调用会触发 ASGI 响应对象的 __call__ 方法，其核心行为包括：
+            # 发送 HTTP 响应头和正文
+            # 调用 send 函数发送 http.response.start 和 http.response.body 消息，将响应状态码、头部和正文内容传递给 ASGI 服务器（如 Uvicorn、Hypercorn），最终由服务器将数据发送到客户端。
+            # 结束请求生命周期
+            # 标记当前请求处理完成，释放资源（如关闭文件、数据库连接等）。
+            # 3. 代码示例（基于 Starlette 的 Response）
+            # 假设 self._create_error_response(...) 返回的是 Starlette 的 Response 对象，则代码逻辑如下：
+            # from starlette.responses import Response
+            # def _create_error_response(self, message, status_code):
+            #     return Response(content=message, status_code=status_code)
+            # # 调用 response(scope, receive, send) 时，实际执行的是：
+            # class Response:
+            #     async def __call__(self, scope, receive, send):
+            #         await send({
+            #             "type": "http.response.start",
+            #             "status": self.status_code,
+            #             "headers": self.headers,
+            #         })
+            #         await send({
+            #             "type": "http.response.body",
+            #             "body": self.body,
+            #             "more_body": False,
+            #         })
+            # 4. 关键点总结
+            # response 是一个可调用对象：其实现了 ASGI 的 __call__ 方法，用于处理请求并发送响应。
+            # send 是 ASGI 服务器提供的回调函数：用于将响应数据传递给服务器，最终发送到客户端。
+            # 此调用是 ASGI 应用的标准行为：所有符合 ASGI 协议的应用或中间件都需要通过 __call__ 方法处理请求并返回响应。
             await response(scope, receive, send)
+
+            # 在 ASGI（Asynchronous Server Gateway Interface）中，scope、receive 和 send 是三个核心参数，用于定义应用程序与服务器之间的交互接口。它们的作用如下：
+            # 1. scope 的作用
+            # scope 是一个字典（dict），包含当前连接的上下文信息，例如协议类型、请求方法、路径、查询参数等。其作用是为应用程序提供连接的全局状态和元数据。
+            # 关键字段：
+            # scope["type"]：标识协议类型，如 "http"（HTTP 请求）或 "websocket"（WebSocket 连接）。
+            # 其他字段根据协议不同而变化。例如，HTTP 请求中包含 method、path、query_string 等；WebSocket 连接中包含 subprotocols 等 146。
+            # 2. receive 的作用
+            # receive 是一个异步函数（Receive 类型），用于从客户端接收事件消息。应用程序通过调用 await receive() 获取客户端发送的数据。
+            # 消息格式：返回的事件消息是一个字典，包含 type（消息类型）、body（二进制数据）和 more_body（是否还有更多数据）等字段。例如：
+            # event = await receive()
+            # # 示例返回值:
+            # # {"type": "http.request", "body": b"data", "more_body": False}
+            # 用途：用于处理客户端请求体的分段读取（如大文件上传）或 WebSocket 消息的接收 136。
+            # 3. send 的作用
+            # send 是一个异步函数（Send 类型），用于向客户端发送事件消息。应用程序通过调用 await send(event) 返回响应数据。
+            # 消息格式：发送的事件消息同样是一个字典，包含 type（消息类型）和对应的数据。例如：
+            # await send({
+            #     "type": "http.response.start",
+            #     "status": 200,
+            #     "headers": [[b"content-type", b"text/html"]],
+            # })
+            # await send({
+            #     "type": "http.response.body",
+            #     "body": b"Hello World",
+            #     "more_body": False,
+            # })
+            # 用途：用于发送 HTTP 响应头和响应体、WebSocket 消息或关闭连接通知。必须确保消息顺序符合协议要求（如 HTTP 响应需先发送头再发送体）136。
+            # 总结
+            # scope 提供连接上下文（如协议类型、请求路径）。
+            # receive 用于异步接收客户端消息（如请求体、WebSocket 数据）。
+            # send 用于异步发送响应消息（如 HTTP 响应头和体、WebSocket 事件）。
+            # 这三者共同构成了 ASGI 应用程序的标准接口，支持异步处理 HTTP、WebSocket 等多种协议，并确保服务器与应用程序之间的兼容性 346.
             return
 
         if request.method == "POST":

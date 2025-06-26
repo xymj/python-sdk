@@ -164,11 +164,34 @@ class StreamableHTTPSessionManager:
             event_store=None,  # No event store in stateless mode
         )
 
+        # 在 AnyIO 的 TaskGroup.start() 机制中，await self._task_group.start(run_stateless_server) 的行为取决于目标协程（run_stateless_server）是否调用 task_status.started()。
+        #
+        # 1. await self.app.run(...) 的作用
+        # 功能：启动应用逻辑（如处理请求循环），通常是一个长期运行的异步任务。
+        # 执行时机：在 task_status.started() 之后执行，确保初始化完成后再启动应用逻辑。
+        # 2. TaskGroup.start(...) 是否立即返回
+        # 关键条件：TaskGroup.start() 会阻塞当前协程，直到目标协程调用 task_status.started()。
+        # 结论：
+        # 如果 run_stateless_server 中 未调用 task_status.started()，TaskGroup.start() 会抛出 RuntimeError。
+        # 如果 已调用 task_status.started()（如代码中的 task_status.started()），TaskGroup.start() 会在 task_status.started() 执行后立即返回，不等待 await self.app.run(...) 完成。
+        # 3. 代码执行流程
+        # 调用 TaskGroup.start(...)：
+        # 阻塞当前协程，直到 run_stateless_server 中的 task_status.started() 被调用。
+        # 在代码中，task_status.started() 在 async with http_transport.connect(...) 之后调用，因此 TaskGroup.start(...) 会在连接初始化完成后返回。
+        # 后续执行：
+        # run_stateless_server 继续执行 await self.app.run(...)，在后台运行应用逻辑。
+        # await http_transport.handle_request(...) 会立即执行（无需等待 app.run(...)），因为 TaskGroup.start(...) 已返回。
+        # 4. 总结
+        # await self._task_group.start(...) 不会立即返回，而是等待 task_status.started() 被调用（在代码中已实现）。
+        # await self.app.run(...) 在后台异步执行，不影响 handle_request(...) 的调用顺序。
+        # 若 task_status.started() 未被调用，TaskGroup.start(...) 会抛出异常。
         # Start server in a new task
         async def run_stateless_server(*, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED):
             async with http_transport.connect() as streams:
                 read_stream, write_stream = streams
+                # 标记任务启动完成，_task_group.start()立即返回
                 task_status.started()
+                # 等待服务初始化完成
                 await self.app.run(
                     read_stream,
                     write_stream,
